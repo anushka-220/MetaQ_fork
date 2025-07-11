@@ -5,25 +5,27 @@ from scipy import sparse
 from torch.utils.data import Dataset, DataLoader
 
 
-class MetaQDataset(Dataset):
+class MetaQDataset(Dataset): #store and manage multi omics data
     def __init__(self, x_list, sf_list, raw_list):
         super().__init__()
-        self.x_list = x_list
-        self.sf_list = sf_list
-        self.raw_list = raw_list
+        self.x_list = x_list #normalized input matrix
+        self.sf_list = sf_list #size factor
+        self.raw_list = raw_list #raw count matrix
 
-        self.cell_num = self.x_list[0].shape[0]
-        self.omics_num = len(self.x_list)
+        self.cell_num = self.x_list[0].shape[0] # number of cells
+        self.omics_num = len(self.x_list) # number of omics
 
-        for i in range(self.omics_num):
+        for i in range(self.omics_num): 
             self.x_list[i] = torch.from_numpy(self.x_list[i]).float()
             self.sf_list[i] = torch.from_numpy(self.sf_list[i]).float()
             self.raw_list[i] = torch.from_numpy(self.raw_list[i]).float()
 
     def __len__(self):
-        return int(self.cell_num)
+        return int(self.cell_num) # return the number of cells
 
-    def __getitem__(self, index):
+    def __getitem__(self, index): 
+        #retrieves the index-th cell from all omics, and returns a 
+        #dictionary of its input (x), size factor (sf), and raw counts (raw).
         x_list = []
         sf_list = []
         raw_list = []
@@ -32,12 +34,12 @@ class MetaQDataset(Dataset):
             sf_list.append(self.sf_list[i][index])
             raw_list.append(self.raw_list[i][index])
         data = {"x": x_list, "sf": sf_list, "raw": raw_list}
-        return data
+        return data 
 
 
 def preprocess(adata, data_type):
     if isinstance(adata.X, sparse.csr_matrix) or isinstance(adata.X, sparse.csc_matrix):
-        adata.X = adata.X.toarray()
+        adata.X = adata.X.toarray() #dense matrix conversion
     raw = adata.X.copy()
 
     if data_type == "RNA":
@@ -123,22 +125,22 @@ def load_data(args):
 
 def compute_metacell(adata, meta_ids, args):
     meta_ids = meta_ids.astype(int)
-    non_empty_metacell = np.zeros(meta_ids.max() + 1).astype(bool)
+    non_empty_metacell = np.zeros(meta_ids.max() + 1).astype(bool) #boolean mask for non-empty metacells
     non_empty_metacell[np.unique(meta_ids)] = True
 
-    data = adata.X
+    data = adata.X #original data matrix
     data_meta = np.stack(
         [data[meta_ids == i].mean(axis=0) for i in range(meta_ids.max() + 1)]
-    )
-    data_meta = data_meta[non_empty_metacell]
+    ) # for each metacell id i, average the data of all cells assigned to metacell i
+    data_meta = data_meta[non_empty_metacell] 
     metacell_adata = sc.AnnData(data_meta)
 
-    if args.type_key in adata.obs_keys():
-        type_int = torch.from_numpy(adata.obs[args.type_key].cat.codes.values).long()
+    if args.type_key in adata.obs_keys(): #executed if cell_type info is available
+        type_int = torch.from_numpy(adata.obs[args.type_key].cat.codes.values).long() #encoding cell types as integers
         type_map = {
             i: adata.obs[args.type_key].cat.categories[i]
             for i in range(type_int.max() + 1)
-        }
+        } #reverse mapping from integer to cell type for decoding later
         type_one_hot = torch.zeros(type_int.shape[0], type_int.max() + 1)
         type_one_hot.scatter_(1, type_int.unsqueeze(1), 1)
         type_meta = (
@@ -150,9 +152,9 @@ def compute_metacell(adata, meta_ids, args):
             )
             .argmax(dim=1)
             .numpy()
-        )
-        type_meta = np.array([type_map[i] for i in type_meta])
+        ) #averaging the one hot vectors of all cells within each metacell and taking argmax to pick majority voted label
+        type_meta = np.array([type_map[i] for i in type_meta]) #decoding
         type_meta = type_meta[non_empty_metacell]
         metacell_adata.obs[args.type_key] = type_meta
 
-    return metacell_adata
+    return metacell_adata #metacell wise average expressions 

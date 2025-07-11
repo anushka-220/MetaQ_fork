@@ -9,26 +9,28 @@ class Quantizer(nn.Module):
     def __init__(self, entry_num, entry_dim):
         super().__init__()
 
-        self.entry_num = entry_num
-        self.entry_dim = entry_dim
+        self.entry_num = entry_num # number of entries in the codebook/ number of metacells to be inferred
+        self.entry_dim = entry_dim #dimension of each codebook entry
         self.decay = 0.9
-        self.entry = nn.Embedding(self.entry_num, self.entry_dim)
-        self.register_buffer("entry_prob", torch.zeros(self.entry_num))
+        self.entry = nn.Embedding(self.entry_num, self.entry_dim) #the codebook- learnable lookup table
+        self.register_buffer("entry_prob", torch.zeros(self.entry_num)) #entry prob tracks how often each codebook entry is used
 
-    def init_codebook(self, z, method):
+    def init_codebook(self, z, method): #z: cell embeddings of shape (N,D) = (no of cells, entry_dim)
         if method == "Random":
             self.entry.weight.data.uniform_(-1.0 / self.entry_num, 1.0 / self.entry_num)
         elif method == "Kmeans":
-            import faiss
+            import faiss #facebook ai library
 
-            d = z.shape[1]
+            d = z.shape[1] #no of features in each embedding = entry_dim
             kmeans = faiss.Kmeans(d, self.entry_num, spherical=True, gpu=True)
             kmeans.train(z)
-            D, I = kmeans.index.search(z, 1)
-            assignments = I.reshape(-1)
-            centers = np.zeros((self.entry_num, d))
+            # D : (N,1): For each point in z, this gives the distance to its nearest codebook entries
+            # I: (N,1): For each point in z, give the index of the nearest codebook entries
+            D, I = kmeans.index.search(z, 1) 
+            assignments = I.reshape(-1) #which codebook entry(metacell) the ith cell was assigned to by the kmeans
+            centers = np.zeros((self.entry_num, d)) #new matrix centers to hold the final codebook vectors
             for i in range(self.entry_num):
-                centers[i] = z[assignments == i].mean(axis=0)
+                centers[i] = z[assignments == i].mean(axis=0) #mean of assigned points
             self.entry.weight.data.copy_(torch.from_numpy(centers))
         elif method == "Geometric":
             from geosketch import gs
@@ -36,22 +38,23 @@ class Quantizer(nn.Module):
             sketch_index = gs(z, self.entry_num, replace=False)
             self.entry.weight.data.copy_(torch.from_numpy(z[sketch_index]))
 
-    def forward(self, e, return_assignment):
+    def forward(self, e, return_assignment): #(e: cell embeddings from encoder)
         # cosine similarity
         normed_e = F.normalize(e, dim=1).detach()
         normed_c = F.normalize(self.entry.weight, dim=1)
+        # compute cosine sim between each input embedding and each codebook entry
         sim = torch.einsum("bd,dn->bn", normed_e, rearrange(normed_c, "n d -> d n"))
 
         # entry assignment
-        assignment_indices = torch.argmax(sim, dim=1)
+        assignment_indices = torch.argmax(sim, dim=1) #index of most sim entry
         assignments = torch.zeros(
             assignment_indices.unsqueeze(1).shape[0], self.entry_num, device=e.device
-        )
+        )#one hot encoded matrix
         assignments.scatter_(1, assignment_indices.unsqueeze(1), 1)
-        avg_probs = torch.mean(assignments, dim=0)
+        avg_probs = torch.mean(assignments, dim=0) #prob of each codebook entry to be selected
 
         # quantize
-        e_q = torch.matmul(assignments, self.entry.weight)
+        e_q = torch.matmul(assignments, self.entry.weight) #each cell now replaced with its nearest codebook entry
         # L_C
         loss = torch.mean((e_q - e.detach()) ** 2)
 
@@ -177,13 +180,13 @@ class MetaQ(nn.Module):
                 get_decoder(data_type, entry_dim, input_dim)
                 for input_dim, data_type in zip(input_dims, data_types)
             ]
-        )
+        ) #used to reconstruct the input before quantization
         self.decoders_q = nn.ModuleList(
             [
                 get_decoder(data_type, entry_dim * self.omics_num, input_dim)
                 for input_dim, data_type in zip(input_dims, data_types)
             ]
-        )
+        )#used to reconstrust input from quantized representation
 
     def copy_decoder_q(self):
         if self.omics_num == 1:
